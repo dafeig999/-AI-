@@ -1,0 +1,648 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>泡泡龙 Bubble Shooter</title>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body {
+    background: linear-gradient(135deg, #0f0c29, #302b63, #24243e);
+    min-height: 100vh;
+    display: flex;
+    justify-content: center;
+    align-items: center;
+    font-family: 'Segoe UI', Arial, sans-serif;
+  }
+  .game-wrapper {
+    background: rgba(255,255,255,0.08);
+    border-radius: 20px;
+    padding: 24px;
+    box-shadow: 0 20px 60px rgba(0,0,0,0.6);
+    backdrop-filter: blur(8px);
+  }
+  canvas {
+    display: block;
+    margin: 0 auto;
+    border-radius: 12px;
+    box-shadow: inset 0 0 30px rgba(0,0,0,0.3);
+    background: #1a1a2e;
+    cursor: crosshair;
+  }
+  .header {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    padding: 12px 8px;
+    color: #eee;
+  }
+  .header .score { font-size: 22px; font-weight: bold; color: #f1c40f; }
+  .header .balls-left { font-size: 16px; color: #aaa; }
+  .btn {
+    padding: 8px 20px;
+    border: none;
+    border-radius: 8px;
+    font-size: 15px;
+    cursor: pointer;
+    color: #fff;
+    transition: transform .15s, box-shadow .15s;
+  }
+  .btn:hover { transform: scale(1.05); }
+  .btn-restart { background: #e74c3c; }
+  .btn-restart:hover { box-shadow: 0 0 15px #e74c3c88; }
+  .info-bar { display: flex; gap: 24px; align-items: center; }
+  .next-bubble {
+    display: flex; align-items: center; gap: 6px;
+    font-size: 14px; color: #ccc;
+  }
+  .next-ball-preview {
+    width: 24px; height: 24px;
+    border-radius: 50%;
+    border: 2px solid rgba(255,255,255,0.3);
+    display: inline-block;
+  }
+  @media (max-width: 520px) {
+    .game-wrapper { padding: 12px; }
+  }
+</style>
+</head>
+<body>
+
+<div class="game-wrapper">
+  <div class="header">
+    <div class="score">💎 得分: <span id="scoreDisplay">0</span></div>
+    <div class="info-bar">
+      <div class="next-bubble">
+        下一个:
+        <span id="nextBallPreview" class="next-ball-preview"></span>
+      </div>
+      <button class="btn btn-restart" id="restartBtn">重新开始</button>
+    </div>
+  </div>
+  <canvas id="gameCanvas"></canvas>
+</div>
+
+<script>
+// ============== 泡泡龙核心代码 ==============
+
+const canvas = document.getElementById('gameCanvas');
+const ctx = canvas.getContext('2d');
+
+// 尺寸适配
+const COLS = 12;
+const ROWS = 14;
+const BALL_RADIUS = 20;
+const GRID_Y_OFFSET = 50;
+
+const canvasWidth = COLS * BALL_RADIUS * 2 + BALL_RADIUS;
+const canvasHeight = (ROWS + 1) * BALL_RADIUS * 1.732 + GRID_Y_OFFSET + 60;
+canvas.width = canvasWidth;
+canvas.height = canvasHeight;
+canvas.style.width = canvasWidth + 'px';
+canvas.style.height = canvasHeight + 'px';
+
+const BALL_DIAMETER = BALL_RADIUS * 2;
+const GRID_SPACING_X = BALL_DIAMETER;
+const GRID_SPACING_Y = BALL_RADIUS * 1.732;
+
+const COLORS = ['#e74c3c', '#3498db', '#2ecc71', '#f1c40f', '#9b59b6', '#e67e22', '#1abc9c', '#ff6b81'];
+
+// ============== 游戏状态 ==============
+let grid = [];
+let shooter = { x: canvasWidth / 2, y: canvasHeight - 40 };
+let currentBall = null;      // { color, x, y, vx, vy, active }
+let nextColor = null;
+let score = 0;
+let gameOver = false;
+let isAnimating = false;
+let stuckBalls = []; // 正在掉落的球动画
+let aimAngle = -Math.PI / 2; // 默认向上
+let mouseX = canvasWidth / 2;
+let mouseY = 0;
+
+// ============== 工具函数 ==============
+function randomColor() {
+  return COLORS[Math.floor(Math.random() * COLORS.length)];
+}
+
+function getGridPos(col, row) {
+  const x = col * GRID_SPACING_X + BALL_RADIUS + (row % 2 === 0 ? 0 : BALL_RADIUS);
+  const y = row * GRID_SPACING_Y + GRID_Y_OFFSET;
+  return { x, y };
+}
+
+function nearestGridPos(x, y) {
+  let best = null;
+  let bestDist = Infinity;
+  for (let r = 0; r < ROWS; r++) {
+    for (let c = 0; c < COLS; c++) {
+      if (grid[r][c]) continue;
+      const pos = getGridPos(c, r);
+      const dist = Math.hypot(pos.x - x, pos.y - y);
+      if (dist < bestDist) { bestDist = dist; best = { col: c, row: r }; }
+    }
+  }
+  return best;
+}
+
+function getNeighbors(col, row) {
+  const neighbors = [];
+  const isOdd = row % 2 === 1;
+  const offsets = isOdd
+    ? [[0,-1],[1,-1],[ -1,0],[1,0],[0,1],[1,1]]
+    : [[-1,-1],[0,-1],[-1,0],[1,0],[-1,1],[0,1]];
+  for (const [dc, dr] of offsets) {
+    const nc = col + dc, nr = row + dr;
+    if (nc >= 0 && nc < COLS && nr >= 0 && nr < ROWS && grid[nr][nc]) {
+      neighbors.push({ col: nc, row: nr });
+    }
+  }
+  return neighbors;
+}
+
+// ============== 网格初始化 ==============
+function initGrid() {
+  grid = [];
+  for (let r = 0; r < ROWS; r++) {
+    grid[r] = [];
+    const colsInRow = r % 2 === 0 ? COLS : COLS - 1;
+    for (let c = 0; c < COLS; c++) {
+      if (r % 2 === 1 && c === COLS - 1) {
+        grid[r][c] = null;
+        continue;
+      }
+      // 前 5 行放球
+      if (r < 5) {
+        grid[r][c] = randomColor();
+      } else {
+        grid[r][c] = null;
+      }
+    }
+  }
+}
+
+// ============== 射击逻辑 ==============
+function spawnBall() {
+  const color = nextColor || randomColor();
+  nextColor = randomColor();
+  document.getElementById('nextBallPreview').style.background = nextColor;
+
+  // 计算发射方向
+  const dx = mouseX - shooter.x;
+  const dy = mouseY - shooter.y;
+  const len = Math.hypot(dx, dy);
+  if (len < 1) return false;
+
+  const speed = 12;
+  const vx = (dx / len) * speed;
+  const vy = (dy / len) * speed;
+
+  currentBall = {
+    color,
+    x: shooter.x,
+    y: shooter.y,
+    vx,
+    vy,
+    active: true
+  };
+  isAnimating = true;
+  return true;
+}
+
+function updateBall() {
+  if (!currentBall || !currentBall.active) return;
+
+  currentBall.x += currentBall.vx;
+  currentBall.y += currentBall.vy;
+
+  // 左右墙壁反弹
+  if (currentBall.x - BALL_RADIUS < 0) {
+    currentBall.x = BALL_RADIUS;
+    currentBall.vx = -currentBall.vx;
+  }
+  if (currentBall.x + BALL_RADIUS > canvasWidth) {
+    currentBall.x = canvasWidth - BALL_RADIUS;
+    currentBall.vx = -currentBall.vx;
+  }
+
+  // 顶部反弹
+  if (currentBall.y - BALL_RADIUS < 0) {
+    currentBall.y = BALL_RADIUS;
+    currentBall.vy = -currentBall.vy;
+  }
+
+  // 检查碰撞到已有的球
+  for (let r = 0; r < ROWS; r++) {
+    for (let c = 0; c < COLS; c++) {
+      if (!grid[r][c]) continue;
+      const pos = getGridPos(c, r);
+      const dist = Math.hypot(pos.x - currentBall.x, pos.y - currentBall.y);
+      if (dist < BALL_DIAMETER - 2) {
+        // 碰撞！吸附到最近的空格
+        currentBall.active = false;
+        isAnimating = false;
+        stickBall(currentBall.color, currentBall.x, currentBall.y);
+        return;
+      }
+    }
+  }
+
+  // 检查是否到达顶部（没有球时）
+  if (currentBall.y - BALL_RADIUS <= 0) {
+    currentBall.active = false;
+    isAnimating = false;
+    stickBall(currentBall.color, currentBall.x, currentBall.y);
+    return;
+  }
+}
+
+function stickBall(color, x, y) {
+  const cell = nearestGridPos(x, y);
+  if (!cell) {
+    // 没有空格 — game over
+    gameOver = true;
+    return;
+  }
+  grid[cell.row][cell.col] = color;
+
+  // 检查消除
+  const matched = new Set();
+  const stack = [{ col: cell.col, row: cell.row }];
+  while (stack.length) {
+    const { col, row } = stack.pop();
+    const key = `${col},${row}`;
+    if (matched.has(key)) continue;
+    if (!grid[row][col] || grid[row][col] !== color) continue;
+    matched.add(key);
+    for (const n of getNeighbors(col, row)) {
+      stack.push(n);
+    }
+  }
+
+  if (matched.size >= 3) {
+    // 消除
+    for (const key of matched) {
+      const [c, r] = key.split(',').map(Number);
+      grid[r][c] = null;
+    }
+    score += matched.size * 10;
+    document.getElementById('scoreDisplay').textContent = score;
+
+    // 检测掉落（孤立的球）
+    dropDisconnected();
+
+    // 检查胜利
+    checkWin();
+  } else {
+    checkLose();
+  }
+}
+
+function dropDisconnected() {
+  // 找到所有连接到顶部的球（第0行）
+  const connected = new Set();
+  for (let c = 0; c < COLS; c++) {
+    if (!grid[0][c]) continue;
+    const stack = [{ col: c, row: 0 }];
+    while (stack.length) {
+      const { col, row } = stack.pop();
+      const key = `${col},${row}`;
+      if (connected.has(key)) continue;
+      if (!grid[row]?.[col]) continue;
+      connected.add(key);
+      for (const n of getNeighbors(col, row)) {
+        stack.push(n);
+      }
+    }
+  }
+
+  // 不在 connected 中的球 → 掉落
+  for (let r = 0; r < ROWS; r++) {
+    for (let c = 0; c < COLS; c++) {
+      if (!grid[r][c]) continue;
+      const key = `${c},${r}`;
+      if (!connected.has(key)) {
+        stuckBalls.push({
+          x: getGridPos(c, r).x,
+          y: getGridPos(c, r).y,
+          color: grid[r][c],
+          vy: 2 + Math.random() * 2,
+          opacity: 1
+        });
+        grid[r][c] = null;
+        score += 15;
+        document.getElementById('scoreDisplay').textContent = score;
+      }
+    }
+  }
+}
+
+function checkWin() {
+  let hasBall = false;
+  for (let r = 0; r < ROWS && !hasBall; r++) {
+    for (let c = 0; c < COLS && !hasBall; c++) {
+      if (grid[r][c]) hasBall = true;
+    }
+  }
+  if (!hasBall) {
+    gameOver = true;
+    isAnimating = false;
+    currentBall = null;
+  }
+}
+
+function checkLose() {
+  for (let c = 0; c < COLS; c++) {
+    if (grid[ROWS - 1] && grid[ROWS - 1][c]) {
+      gameOver = true;
+      isAnimating = false;
+      currentBall = null;
+      return;
+    }
+  }
+}
+
+// ============== 射击瞄准（基于鼠标） ==============
+function updateAim() {
+  const dx = mouseX - shooter.x;
+  const dy = mouseY - shooter.y;
+  aimAngle = Math.atan2(dy, dx);
+  // 限制角度不让往下射
+  if (aimAngle > -0.15) aimAngle = -0.15;
+  if (aimAngle < -Math.PI + 0.15) aimAngle = -Math.PI + 0.15;
+}
+
+// ============== 绘制 ==============
+function draw() {
+  ctx.clearRect(0, 0, canvas.width, canvas.height);
+
+  // 绘制网格（装饰）
+  for (let r = 0; r < ROWS; r++) {
+    for (let c = 0; c < (r % 2 === 0 ? COLS : COLS - 1); c++) {
+      const pos = getGridPos(c, r);
+      if (!grid[r][c]) {
+        ctx.beginPath();
+        ctx.arc(pos.x, pos.y, BALL_RADIUS - 2, 0, Math.PI * 2);
+        ctx.fillStyle = 'rgba(255,255,255,0.04)';
+        ctx.fill();
+      }
+    }
+  }
+
+  // 绘制球
+  for (let r = 0; r < ROWS; r++) {
+    for (let c = 0; c < COLS; c++) {
+      if (!grid[r][c]) continue;
+      drawBall(getGridPos(c, r).x, getGridPos(c, r).y, grid[r][c]);
+    }
+  }
+
+  // 绘制掉落的球
+  for (let i = stuckBalls.length - 1; i >= 0; i--) {
+    const b = stuckBalls[i];
+    b.y += b.vy;
+    b.vy += 0.15;
+    b.opacity -= 0.008;
+    ctx.globalAlpha = Math.max(0, b.opacity);
+    drawBall(b.x, b.y, b.color);
+    ctx.globalAlpha = 1;
+    if (b.opacity <= 0 || b.y > canvasHeight + 50) {
+      stuckBalls.splice(i, 1);
+    }
+  }
+
+  // 绘制瞄准线
+  if (!currentBall && !gameOver) {
+    const len = 400;
+    let endX = shooter.x + Math.cos(aimAngle) * len;
+    let endY = shooter.y + Math.sin(aimAngle) * len;
+
+    ctx.save();
+    ctx.setLineDash([6, 6]);
+    ctx.strokeStyle = 'rgba(255,255,255,0.2)';
+    ctx.lineWidth = 1.5;
+    ctx.beginPath();
+    ctx.moveTo(shooter.x, shooter.y);
+    ctx.lineTo(endX, endY);
+    ctx.stroke();
+    ctx.restore();
+
+    // 绘制瞄准点
+    ctx.beginPath();
+    ctx.arc(endX, endY, 3, 0, Math.PI * 2);
+    ctx.fillStyle = 'rgba(255,255,255,0.3)';
+    ctx.fill();
+  }
+
+  // 绘制发射器（炮台）
+  const gunLen = 44;
+  const angle = currentBall ? Math.atan2(currentBall.vy, currentBall.vx) : aimAngle;
+  const gx = shooter.x + Math.cos(angle) * gunLen;
+  const gy = shooter.y + Math.sin(angle) * gunLen;
+
+  ctx.shadowColor = 'rgba(255,255,255,0.1)';
+  ctx.shadowBlur = 12;
+
+  // 炮管
+  ctx.beginPath();
+  ctx.moveTo(shooter.x, shooter.y);
+  ctx.lineTo(gx, gy);
+  ctx.strokeStyle = '#8e8eae';
+  ctx.lineWidth = 8;
+  ctx.lineCap = 'round';
+  ctx.stroke();
+
+  ctx.shadowBlur = 0;
+
+  // 炮管高光
+  ctx.beginPath();
+  ctx.moveTo(shooter.x, shooter.y);
+  ctx.lineTo(gx, gy);
+  ctx.strokeStyle = 'rgba(255,255,255,0.3)';
+  ctx.lineWidth = 3;
+  ctx.lineCap = 'round';
+  ctx.stroke();
+
+  // 炮座
+  ctx.beginPath();
+  ctx.arc(shooter.x, shooter.y, 16, 0, Math.PI * 2);
+  ctx.fillStyle = '#6c5ce7';
+  ctx.fill();
+  ctx.strokeStyle = '#a29bfe';
+  ctx.lineWidth = 3;
+  ctx.stroke();
+
+  // 当前飞行中的球
+  if (currentBall && currentBall.active) {
+    drawBall(currentBall.x, currentBall.y, currentBall.color);
+  }
+
+  // 待发射的球（在炮口显示）
+  if (!currentBall && !gameOver) {
+    drawBall(gx, gy, nextColor || COLORS[0]);
+  }
+
+  // ============== 游戏结束画面 ==============
+  if (gameOver) {
+    ctx.fillStyle = 'rgba(0,0,0,0.65)';
+    ctx.fillRect(0, 0, canvas.width, canvas.height);
+
+    ctx.font = 'bold 42px "Segoe UI", Arial, sans-serif';
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+
+    const hasBall = grid.some(row => row.some(cell => cell));
+    if (hasBall) {
+      ctx.fillStyle = '#e74c3c';
+      ctx.fillText('游戏结束', canvasWidth / 2, canvasHeight / 2 - 40);
+      ctx.font = '20px "Segoe UI", Arial, sans-serif';
+      ctx.fillStyle = '#ddd';
+      ctx.fillText('点击「重新开始」再玩一局', canvasWidth / 2, canvasHeight / 2 + 30);
+    } else {
+      ctx.fillStyle = '#f1c40f';
+      ctx.fillText('🎉 恭喜通关！', canvasWidth / 2, canvasHeight / 2 - 40);
+      ctx.font = '22px "Segoe UI", Arial, sans-serif';
+      ctx.fillStyle = '#ddd';
+      ctx.fillText(`最终得分: ${score}`, canvasWidth / 2, canvasHeight / 2 + 30);
+    }
+  }
+}
+
+function drawBall(x, y, color) {
+  ctx.shadowColor = 'rgba(0,0,0,0.3)';
+  ctx.shadowBlur = 8;
+
+  // 渐变球体
+  const grad = ctx.createRadialGradient(x - 6, y - 6, 2, x, y, BALL_RADIUS);
+  grad.addColorStop(0, lighten(color, 50));
+  grad.addColorStop(0.7, color);
+  grad.addColorStop(1, darken(color, 30));
+
+  ctx.beginPath();
+  ctx.arc(x, y, BALL_RADIUS - 1, 0, Math.PI * 2);
+  ctx.fillStyle = grad;
+  ctx.fill();
+  ctx.shadowBlur = 0;
+
+  // 高光
+  ctx.beginPath();
+  ctx.arc(x - 6, y - 7, 6, 0, Math.PI * 2);
+  ctx.fillStyle = 'rgba(255,255,255,0.3)';
+  ctx.fill();
+
+  // 边框
+  ctx.beginPath();
+  ctx.arc(x, y, BALL_RADIUS - 1, 0, Math.PI * 2);
+  ctx.strokeStyle = 'rgba(255,255,255,0.1)';
+  ctx.lineWidth = 1;
+  ctx.stroke();
+}
+
+// 颜色辅助
+function lighten(hex, amt) {
+  let c = parseInt(hex.slice(1), 16);
+  let r = Math.min(255, (c >> 16) + amt);
+  let g = Math.min(255, ((c >> 8) & 0xff) + amt);
+  let b = Math.min(255, (c & 0xff) + amt);
+  return `rgb(${r},${g},${b})`;
+}
+function darken(hex, amt) { return lighten(hex, -amt); }
+
+// ============== 事件绑定 ==============
+canvas.addEventListener('mousemove', e => {
+  const rect = canvas.getBoundingClientRect();
+  const scaleX = canvas.width / rect.width;
+  const scaleY = canvas.height / rect.height;
+  mouseX = (e.clientX - rect.left) * scaleX;
+  mouseY = (e.clientY - rect.top) * scaleY;
+  updateAim();
+});
+
+canvas.addEventListener('click', () => {
+  if (gameOver || currentBall || isAnimating) return;
+  spawnBall();
+});
+
+// 触摸支持
+canvas.addEventListener('touchstart', e => {
+  e.preventDefault();
+  const rect = canvas.getBoundingClientRect();
+  const touch = e.touches[0];
+  const scaleX = canvas.width / rect.width;
+  const scaleY = canvas.height / rect.height;
+  mouseX = (touch.clientX - rect.left) * scaleX;
+  mouseY = (touch.clientY - rect.top) * scaleY;
+  updateAim();
+  if (gameOver || currentBall || isAnimating) return;
+  spawnBall();
+});
+
+canvas.addEventListener('touchmove', e => {
+  e.preventDefault();
+  const rect = canvas.getBoundingClientRect();
+  const touch = e.touches[0];
+  const scaleX = canvas.width / rect.width;
+  const scaleY = canvas.height / rect.height;
+  mouseX = (touch.clientX - rect.left) * scaleX;
+  mouseY = (touch.clientY - rect.top) * scaleY;
+  updateAim();
+});
+
+// 键盘支持 - 左右移动瞄准
+document.addEventListener('keydown', e => {
+  const step = 0.08;
+  if (e.key === 'ArrowLeft' || e.key === 'a') {
+    const dx = mouseX - shooter.x;
+    const dy = mouseY - shooter.y;
+    let angle = Math.atan2(dy, dx);
+    angle = Math.max(-Math.PI + 0.15, Math.min(-0.15, angle - step));
+    mouseX = shooter.x + Math.cos(angle) * 300;
+    mouseY = shooter.y + Math.sin(angle) * 300;
+    updateAim();
+  } else if (e.key === 'ArrowRight' || e.key === 'd') {
+    const dx = mouseX - shooter.x;
+    const dy = mouseY - shooter.y;
+    let angle = Math.atan2(dy, dx);
+    angle = Math.max(-Math.PI + 0.15, Math.min(-0.15, angle + step));
+    mouseX = shooter.x + Math.cos(angle) * 300;
+    mouseY = shooter.y + Math.sin(angle) * 300;
+    updateAim();
+  } else if (e.key === ' ' || e.key === 'Enter') {
+    e.preventDefault();
+    if (gameOver || currentBall || isAnimating) return;
+    spawnBall();
+  }
+});
+
+document.getElementById('restartBtn').addEventListener('click', restartGame);
+
+// ============== 游戏循环 ==============
+function restartGame() {
+  initGrid();
+  nextColor = randomColor();
+  document.getElementById('nextBallPreview').style.background = nextColor;
+  currentBall = null;
+  stuckBalls = [];
+  score = 0;
+  gameOver = false;
+  isAnimating = false;
+  document.getElementById('scoreDisplay').textContent = '0';
+}
+
+function gameLoop() {
+  if (currentBall && currentBall.active) {
+    updateBall();
+  }
+  draw();
+  requestAnimationFrame(gameLoop);
+}
+
+// ============== 启动 ==============
+initGrid();
+nextColor = randomColor();
+document.getElementById('nextBallPreview').style.background = nextColor;
+document.getElementById('scoreDisplay').textContent = '0';
+gameLoop();
+</script>
+</body>
+</html>
